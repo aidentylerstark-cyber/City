@@ -1,0 +1,28 @@
+# Postgres for local development. The app itself runs on the host via
+# `npm run dev` — this file exists only so the one external dependency is a
+# single command instead of a platform-specific install.
+#
+#   docker compose up -d
+#
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: citylink-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: citylink
+      POSTGRES_PASSWORD: citylink
+      POSTGRES_DB: citylink
+    ports:
+      # 5433 on the host, so it does not collide with a Postgres you already run.
+      - '5433:5432'
+    volumes:
+      - citylink-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U citylink -d citylink']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  citylink-pgdata:

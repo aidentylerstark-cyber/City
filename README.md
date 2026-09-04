@@ -29,11 +29,18 @@ carries the avatar it belongs to, not just the town that wrote it.
 ```bash
 git clone <this repo> && cd City
 npm install
+docker compose up -d          # Postgres on port 5433
 cp .env.example .env          # then fill in the secrets below
-npm run db:push
-npm run db:seed
-npm run dev
+npm run setup                 # db:push + db:seed
+npm run dev                   # http://localhost:3000
 ```
+
+City Link is **one process** — the pages and the API are the same Next.js app.
+There is no separate backend to start. Check it came up healthy with
+`npm run health`.
+
+Full walkthrough, including how to sign up locally without Second Life and how
+to deploy a public preview: [`docs/running.md`](docs/running.md).
 
 Generate the two secrets with `openssl rand -base64 48`:
 
@@ -93,6 +100,8 @@ delivered to *you*, in-world, by the grid.
 
 ## Documentation
 
+- [`docs/running.md`](docs/running.md) — running it locally, signing up without
+  the grid, and deploying a public preview
 - [`docs/architecture.md`](docs/architecture.md) — the three-layer model, and
   why records key to avatars
 - [`docs/second-life-setup.md`](docs/second-life-setup.md) — in-world objects and

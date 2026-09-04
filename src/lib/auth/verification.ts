@@ -1,5 +1,8 @@
+import { randomUUID } from 'node:crypto'
+
 import { db } from '@/lib/db'
-import { generateVerificationCode, normalizeVerificationCode, sha256 } from '@/lib/crypto'
+import { env } from '@/lib/env'
+import { deriveVerificationCode, normalizeVerificationCode, sha256 } from '@/lib/crypto'
 import { normalizeSlUsername } from '@/lib/sl/username'
 import type { VerificationPurpose } from '@prisma/client'
 
@@ -16,6 +19,12 @@ import type { VerificationPurpose } from '@prisma/client'
  *   request -> (object delivers, learning the UUID) -> confirm
  * A code that was never delivered can never be confirmed, so requesting codes
  * for someone else's username accomplishes nothing.
+ *
+ * The plaintext code is never stored and never held in memory. It is derived
+ * on demand from the row id and AUTH_SECRET, so any instance can reproduce it
+ * while nobody holding only the database can. That matters beyond tidiness:
+ * on serverless the endpoint that issues a code and the bridge endpoint that
+ * delivers it run in separate processes with no shared state.
  */
 
 export const CODE_TTL_MS = 10 * 60 * 1000
@@ -45,10 +54,14 @@ export async function issueVerificationCode(args: {
     data: { expiresAt: now },
   })
 
-  const code = generateVerificationCode(6)
+  // Generate the id up front so the code can be derived from it, rather than
+  // stored anywhere.
+  const id = randomUUID()
+  const code = deriveVerificationCode(env.authSecret, id)
 
   const row = await db.verificationCode.create({
     data: {
+      id,
       slUsername,
       purpose: args.purpose,
       codeHash: sha256(code),
@@ -58,35 +71,12 @@ export async function issueVerificationCode(args: {
     select: { id: true, slUsername: true, expiresAt: true },
   })
 
-  // The plaintext never returns to the caller and never touches the database.
-  // It leaves this process in exactly one place: the signed bridge response to
-  // the in-world object. See `claimCodeForDelivery`.
-  pendingPlaintext.set(row.id, { code, expiresAt: row.expiresAt })
-  sweepPending()
-
   return row
-}
-
-/**
- * Codes waiting for an in-world object to collect them.
- *
- * Held in memory, never on disk: a code at rest in the database would let
- * anyone with a read replica impersonate any avatar mid-signup. The cost is
- * that a restart drops undelivered codes — the user simply asks for a new one,
- * which is the correct trade for a ten-minute secret.
- */
-const pendingPlaintext = new Map<string, { code: string; expiresAt: Date }>()
-
-function sweepPending(): void {
-  const now = Date.now()
-  for (const [id, entry] of pendingPlaintext) {
-    if (entry.expiresAt.getTime() <= now) pendingPlaintext.delete(id)
-  }
 }
 
 export type DeliveryClaim =
   | { ok: true; code: string; codeId: string; purpose: VerificationPurpose }
-  | { ok: false; reason: 'no_pending_code' | 'already_delivered' | 'expired' }
+  | { ok: false; reason: 'no_pending_code' | 'already_delivered' }
 
 /**
  * An in-world object asks: "is there a code waiting for this avatar?"
@@ -115,14 +105,6 @@ export async function claimCodeForDelivery(args: {
 
   if (!row) return { ok: false, reason: 'no_pending_code' }
 
-  const pending = pendingPlaintext.get(row.id)
-  if (!pending) {
-    // Server restarted between request and delivery. Retire the row so the
-    // user gets a clean "request a new code" rather than a stuck one.
-    await db.verificationCode.update({ where: { id: row.id }, data: { expiresAt: new Date() } })
-    return { ok: false, reason: 'expired' }
-  }
-
   await db.verificationCode.update({
     where: { id: row.id },
     data: {
@@ -133,9 +115,12 @@ export async function claimCodeForDelivery(args: {
     },
   })
 
-  pendingPlaintext.delete(row.id)
-
-  return { ok: true, code: pending.code, codeId: row.id, purpose: row.purpose }
+  return {
+    ok: true,
+    code: deriveVerificationCode(env.authSecret, row.id),
+    codeId: row.id,
+    purpose: row.purpose,
+  }
 }
 
 export type ConfirmResult =

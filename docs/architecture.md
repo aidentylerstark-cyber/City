@@ -112,10 +112,16 @@ Three steps, each gating the next:
    thing that authorises this step, so there is no path to an account that skips
    step 2.
 
-The plaintext code lives **in memory only**, never in the database — a code at
-rest would let anyone with a read replica impersonate any avatar mid-signup. A
-restart drops undelivered codes, which is the right trade for a ten-minute
-secret.
+The plaintext code is **never stored and never held in memory**. It is derived
+on demand from the row id and `AUTH_SECRET`
+(`deriveVerificationCode` in `src/lib/crypto.ts`), so any instance can reproduce
+it while nobody holding only the database can — a leaked dump or read replica
+yields nothing.
+
+An earlier draft kept the plaintext in a module-level `Map`. That was wrong: it
+assumed the endpoint issuing a code and the bridge endpoint delivering it share
+one process, which is false on serverless and false in dev, where routes are
+separate bundles. Derivation removes the assumption entirely.
 
 Passwords use scrypt from the Node standard library at the OWASP-recommended
 parameters. No native build step.

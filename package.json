@@ -2,7 +2,7 @@
   "name": "citylink",
   "version": "0.1.0",
   "private": true,
-  "description": "City Link — the management system for Second Life communities.",
+  "description": "City Link \u2014 the management system for Second Life communities.",
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
@@ -14,7 +14,12 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "test": "vitest run"
+    "test": "vitest run",
+    "setup": "npm run db:push && npm run db:seed",
+    "sl:deliver": "tsx --env-file-if-exists=.env scripts/sl-object.ts deliver",
+    "sl:deed": "tsx --env-file-if-exists=.env scripts/sl-object.ts deed",
+    "sl:heartbeat": "tsx --env-file-if-exists=.env scripts/sl-object.ts heartbeat",
+    "health": "curl -s localhost:3000/api/health"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

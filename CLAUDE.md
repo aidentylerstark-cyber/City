@@ -22,7 +22,14 @@ npm run db:seed      # seed the cross-town demo scenario
 ```
 
 `npm run build` must pass before anything is considered done. `typedRoutes` is
-on, so a `<Link>` to a route that does not exist fails the build.
+on, so a `<Link>` to a route that does not exist fails the build. Never run
+`next build` while `next dev` is live — they share `.next` and the dev server
+breaks with `Cannot find module './xxx.js'`.
+
+Pages and API are **one Next.js process**; there is no separate backend. The
+only external dependency is Postgres (`docker compose up -d`, port 5433).
+`npm run sl:deliver -- <username>` stands in for an in-world object so signup
+works locally — it signs real bridge requests, it does not bypass anything.
 
 ## The three layers
 
@@ -64,6 +71,10 @@ signed. Two endpoints prove two different things:
 
 Assume `SL_BRIDGE_SECRET` leaks — full-perm copies happen. Every bridge endpoint
 must stay safe under that assumption.
+
+Verification codes are **derived**, not stored: `deriveVerificationCode(secret,
+rowId)`. Never reintroduce process-local state for anything two routes both
+need — serverless puts them in different lambdas.
 
 The signature is `SHA256(secret + "|" + SHA256(secret + "|" + payload))`, **not
 RFC 2104 HMAC**. LSL's `llSHA256String` hashes a string, and HMAC's pad bytes

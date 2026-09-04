@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  deriveVerificationCode,
   generateVerificationCode,
   hashPassword,
   hmacSha256,
@@ -45,6 +46,41 @@ describe('verification codes', () => {
     expect(normalizeVerificationCode('o1lI0')).toBe('01110')
     expect(normalizeVerificationCode('a1b-2c3')).toBe('A1B2C3')
     expect(normalizeVerificationCode(' a b c ')).toBe('ABC')
+  })
+})
+
+describe('deriveVerificationCode', () => {
+  it('is deterministic for the same secret and row id', () => {
+    expect(deriveVerificationCode('secret', 'row-1')).toBe(deriveVerificationCode('secret', 'row-1'))
+  })
+
+  it('differs per row, so one code never reveals another', () => {
+    expect(deriveVerificationCode('secret', 'row-1')).not.toBe(
+      deriveVerificationCode('secret', 'row-2'),
+    )
+  })
+
+  it('is unguessable without the secret — the row id alone is not enough', () => {
+    // The row id is returned to the client as `requestId`, so this is the
+    // property that keeps it useless to anyone but the server.
+    expect(deriveVerificationCode('secret-a', 'row-1')).not.toBe(
+      deriveVerificationCode('secret-b', 'row-1'),
+    )
+  })
+
+  it('only emits characters from the issued alphabet', () => {
+    for (let i = 0; i < 200; i++) {
+      expect(deriveVerificationCode('secret', `row-${i}`)).toMatch(
+        /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{6}$/,
+      )
+    }
+  })
+
+  it('spreads across the alphabet rather than clustering', () => {
+    const seen = new Set<string>()
+    for (let i = 0; i < 500; i++) seen.add(deriveVerificationCode('secret', `row-${i}`))
+    // 500 distinct rows should give ~500 distinct codes out of 32^6.
+    expect(seen.size).toBeGreaterThan(495)
   })
 })
 

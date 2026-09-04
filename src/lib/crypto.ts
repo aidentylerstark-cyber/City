@@ -56,13 +56,39 @@ export function randomToken(bytes = 32): string {
  * Crockford base32: no I, L, O or U. Those are exactly the glyphs that get
  * misread when someone reads a code off a chat line and retypes it here.
  */
-const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+export const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 /** A verification code a person reads in-world and retypes on the web. */
 export function generateVerificationCode(length = 6): string {
   let out = ''
   for (let i = 0; i < length; i++) {
     out += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]
+  }
+  return out
+}
+
+/**
+ * Derive a verification code deterministically from a row id and a secret.
+ *
+ * This exists so no server has to *remember* an issued code. Any instance
+ * holding the secret can recompute it from the row; an attacker holding the
+ * row — a leaked database dump, a read replica — cannot, because the secret
+ * lives in the environment and never in the table.
+ *
+ * That property is what makes the flow correct across processes: serverless
+ * puts each route in its own lambda, so the endpoint that issues a code and
+ * the bridge endpoint that delivers it share no memory at all.
+ */
+export function deriveVerificationCode(secret: string, codeId: string, length = 6): string {
+  const digest = hmacSha256(secret, `verification-code:${codeId}`)
+
+  // Consume the digest in base-32 chunks. 6 characters is ~30 bits, and the
+  // code is single-use, attempt-capped, and expires in ten minutes.
+  let value = BigInt(`0x${digest.slice(0, 32)}`)
+  let out = ''
+  for (let i = 0; i < length; i++) {
+    out += CODE_ALPHABET[Number(value % 32n)]
+    value /= 32n
   }
   return out
 }
