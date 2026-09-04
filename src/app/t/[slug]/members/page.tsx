@@ -3,7 +3,6 @@ import { notFound, redirect } from 'next/navigation'
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth/session'
 import { can, getTownContext } from '@/lib/towns/service'
-import { prettySlUsername } from '@/lib/sl/username'
 import { JoinRequestQueue } from './join-request-queue'
 
 export const metadata = { title: 'Members' }
@@ -80,7 +79,7 @@ export default async function MembersPage({ params }: { params: Promise<{ slug: 
                 {member.characterName ?? member.account.displayName ?? member.account.username}
               </p>
               <p className="truncate text-sm text-muted">
-                {prettySlUsername(member.account.slAvatar.slUsername)}
+                {member.account.slAvatar.slUsername}
                 {member.title ? ` · ${member.title}` : ''}
                 {member.callsign ? ` · ${member.callsign}` : ''}
               </p>

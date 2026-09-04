@@ -76,7 +76,10 @@ export default async function TownsPage() {
                   </div>
 
                   <div className="mt-4 flex flex-wrap items-center gap-1.5">
-                    {entry.isOwner ? (
+                    {/* Owning the town and holding the Owner role are almost
+                        always the same fact — only badge it separately when a
+                        role does not already say so. */}
+                    {entry.isOwner && !entry.roles.some((role) => role.name === 'Owner') ? (
                       <span className="rounded-md bg-warn/15 px-2 py-0.5 text-xs font-medium text-warn">
                         Owner
                       </span>
