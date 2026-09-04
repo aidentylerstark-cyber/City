@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * One palette, defined light-first, with dark redefined only where the role
+ * changes. Every colour is a token so a town's accent can be swapped at the
+ * component level without a second theme.
+ */
+:root {
+  --bg: 248 250 252;
+  --surface: 255 255 255;
+  --raised: 241 245 249;
+  --line: 226 232 240;
+  --ink: 15 23 42;
+  --muted: 100 116 139;
+  --brand: 37 99 235;
+  --brand-ink: 255 255 255;
+  --danger: 220 38 38;
+  --warn: 217 119 6;
+  --ok: 22 163 74;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: 2 6 23;
+    --surface: 15 23 42;
+    --raised: 30 41 59;
+    --line: 51 65 85;
+    --ink: 241 245 249;
+    --muted: 148 163 184;
+    --brand: 59 130 246;
+    --brand-ink: 255 255 255;
+    --danger: 248 113 113;
+    --warn: 251 191 36;
+    --ok: 74 222 128;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: 2 6 23;
+  --surface: 15 23 42;
+  --raised: 30 41 59;
+  --line: 51 65 85;
+  --ink: 241 245 249;
+  --muted: 148 163 184;
+  --brand: 59 130 246;
+  --brand-ink: 255 255 255;
+  --danger: 248 113 113;
+  --warn: 251 191 36;
+  --ok: 74 222 128;
+  color-scheme: dark;
+}
+
+body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--ink));
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus ring that stays visible on every surface in both themes. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid rgb(var(--brand));
+  outline-offset: 2px;
+}

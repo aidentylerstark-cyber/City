@@ -1,0 +1,862 @@
+// City Link — data model
+//
+// Three layers, and the boundary between them is the whole design:
+//
+//   1. IDENTITY  (global) — one Second Life avatar, one Account. Immutable
+//      anchor that everything else hangs off.
+//   2. TOWN      (scoped) — towns are sovereign. Each has its own roles,
+//      permissions, and staff. A town can delete anything it owns.
+//   3. RECORDS   (town-owned, globally discoverable) — a license issued by
+//      Ashford is Ashford's row: Ashford can revoke or delete it. But because
+//      it carries the avatar's global id, a deputy in Rockport can *find* it.
+//      That is what makes a cross-town traffic stop work.
+//
+// The rule that follows from this: never key a record to an Account. Key it to
+// an SLAvatar. Accounts can be deleted and remade; the avatar is forever.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// LAYER 1 — IDENTITY
+// ---------------------------------------------------------------------------
+
+/// A verified Second Life avatar. Created the moment someone proves ownership
+/// of the avatar via an in-world code, and never deleted — records across every
+/// town point at this row.
+model SLAvatar {
+  id String @id @default(cuid())
+
+  /// SL login name, always lowercased. "john.doe", or "johndoe" for legacy
+  /// single-word accounts. This is what a user types on the login screen.
+  slUsername String @unique
+
+  /// Avatar UUID, learned from the in-world object during verification. This is
+  /// the true primary key in Second Life; usernames can in principle change.
+  slUuid String? @unique
+
+  /// Display name at time of last sighting. Cosmetic, changes freely, never
+  /// used for lookup.
+  slDisplayName String?
+
+  firstSeenAt  DateTime  @default(now())
+  lastVerified DateTime?
+
+  account         Account?
+  issuedDocuments IssuedDocument[]
+  citizenRecords  Citizen[]
+  citations       Citation[]
+  warrants        Warrant[]
+  vehicles        Vehicle[]
+
+  @@index([slUsername])
+}
+
+/// A platform login. Exactly one per verified avatar.
+model Account {
+  id String @id @default(cuid())
+
+  slAvatarId String   @unique
+  slAvatar   SLAvatar @relation(fields: [slAvatarId], references: [id], onDelete: Restrict)
+
+  email        String  @unique
+  username     String  @unique
+  passwordHash String
+  displayName  String?
+  avatarUrl    String?
+
+  status AccountStatus @default(ACTIVE)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
+
+  sessions     Session[]
+  memberships  TownMembership[]
+  ownedTowns   Town[]           @relation("TownOwner")
+  licenses     ProductLicense[]
+  joinRequests JoinRequest[]    @relation("JoinRequester")
+  reviewed     JoinRequest[]    @relation("JoinReviewer")
+  auditEntries AuditLog[]
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model Session {
+  id String @id @default(cuid())
+
+  /// SHA-256 of the cookie token. The raw token only ever exists in the
+  /// user's cookie jar.
+  tokenHash String @unique
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  /// The town this session is currently "inside". Null on the town picker.
+  activeTownId String?
+
+  userAgent String?
+  ip        String?
+
+  createdAt    DateTime @default(now())
+  lastActiveAt DateTime @default(now())
+  expiresAt    DateTime
+
+  @@index([accountId])
+  @@index([expiresAt])
+}
+
+/// A one-time code delivered to an avatar in-world. Proves the person at the
+/// keyboard controls the avatar they claim.
+model VerificationCode {
+  id String @id @default(cuid())
+
+  /// Lowercased SL username the code was issued for. Deliberately not a
+  /// relation: we issue codes for avatars we have never seen before.
+  slUsername String
+
+  /// SHA-256 of the 6-character code. Never store the code itself.
+  codeHash String
+
+  purpose VerificationPurpose
+
+  /// Filled in by the in-world object when it delivers the code — this is how
+  /// we learn the avatar's UUID.
+  resolvedSlUuid      String?
+  resolvedDisplayName String?
+
+  /// Set once an object confirms it handed the code to the avatar. A code that
+  /// was never delivered can never be redeemed.
+  deliveredAt DateTime?
+  /// Which in-world object delivered it (for abuse tracing).
+  deliveredBy String?
+
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+
+  requestIp String?
+
+  @@index([slUsername, purpose])
+  @@index([expiresAt])
+}
+
+enum VerificationPurpose {
+  SIGNUP
+  LOGIN_RECOVERY
+  RELINK
+  PRODUCT_DEED
+}
+
+/// Proof that an account owns the City Link product in Second Life. Granted by
+/// a deeded in-world object that reports its owner back to us. Each license
+/// carries an allowance of towns the holder may create.
+model ProductLicense {
+  id String @id @default(cuid())
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  /// UUID of the in-world object that vouched for this license.
+  objectUuid String  @unique
+  objectName String?
+  /// Region the object reported from, at verification time.
+  region     String?
+  /// Product SKU / edition the object identifies as.
+  productKey String
+
+  /// How many towns this license entitles the holder to run at once.
+  townAllowance Int @default(1)
+
+  status LicenseStatus @default(ACTIVE)
+
+  verifiedAt    DateTime  @default(now())
+  lastHeartbeat DateTime?
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@index([accountId, status])
+}
+
+enum LicenseStatus {
+  ACTIVE
+  /// Object stopped reporting in — soft-expired, reactivates on next heartbeat.
+  DORMANT
+  REVOKED
+}
+
+// ---------------------------------------------------------------------------
+// LAYER 2 — TOWNS, MEMBERSHIP, PERMISSIONS
+// ---------------------------------------------------------------------------
+
+model Town {
+  id   String @id @default(cuid())
+  slug String @unique
+  name String
+
+  tagline     String?
+  description String?
+  /// SL region / sim the town roleplays in.
+  region      String?
+  timezone    String  @default("UTC")
+  logoUrl     String?
+  /// Accent colour, hex. Themes the town's dashboard and printed documents.
+  accentColor String  @default("#3b82f6")
+
+  visibility Visibility @default(PUBLIC)
+  joinPolicy JoinPolicy @default(REQUEST)
+
+  /// When false the town is dark: its records never appear in another town's
+  /// global search. It can still search others (asymmetry is intentional —
+  /// opting out of sharing is a choice a town makes about its own data).
+  shareRecords Boolean @default(true)
+
+  ownerId String
+  owner   Account @relation("TownOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+
+  /// Set when the town is archived rather than hard-deleted, so its issued
+  /// documents keep resolving in other towns' searches.
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships  TownMembership[]
+  roles        Role[]
+  joinRequests JoinRequest[]
+  invites      TownInvite[]
+  citizens     Citizen[]
+  businesses   Business[]
+  documents    IssuedDocument[]
+  citations    Citation[]
+  warrants     Warrant[]
+  vehicles     Vehicle[]
+  departments  Department[]
+  units        Unit[]
+  calls        DispatchCall[]
+  shifts       Shift[]
+  reports      Report[]
+  auditLog     AuditLog[]
+
+  @@index([visibility, archivedAt])
+}
+
+enum Visibility {
+  /// Listed in town search.
+  PUBLIC
+  /// Reachable by direct link or invite code only.
+  UNLISTED
+}
+
+enum JoinPolicy {
+  /// Anyone can join instantly.
+  OPEN
+  /// Anyone can ask; staff approve.
+  REQUEST
+  /// Invite code only.
+  INVITE
+}
+
+model TownMembership {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  /// In-town name badge — the character's name, which need not match the
+  /// avatar's.
+  characterName String?
+  /// Free-text rank/title shown next to the name.
+  title         String?
+  /// Callsign used on the dispatch board, e.g. "A-12".
+  callsign      String?
+
+  status MembershipStatus @default(ACTIVE)
+
+  joinedAt  DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  roles      MemberRole[]
+  assignedTo Unit[]
+  shifts     Shift[]
+
+  @@unique([townId, accountId])
+  @@index([townId, status])
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+  LEFT
+}
+
+/// A permission set inside one town. Every town gets its own roles — nothing
+/// is shared across towns.
+model Role {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  name  String
+  color String @default("#64748b")
+
+  /// Lower sorts first / outranks. Owner is 0. A member may only manage roles
+  /// with a strictly higher priority number than their own best role.
+  priority Int @default(100)
+
+  /// Permission keys, e.g. ["citizens.view","citizens.edit"]. The single key
+  /// "*" grants everything and is reserved for the Owner role.
+  permissions String[]
+
+  /// System roles (Owner, Administrator, Member) cannot be deleted.
+  isSystem  Boolean @default(false)
+  /// Auto-granted to every new member.
+  isDefault Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members MemberRole[]
+
+  @@unique([townId, name])
+  @@index([townId, priority])
+}
+
+model MemberRole {
+  membershipId String
+  membership   TownMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  grantedAt DateTime @default(now())
+
+  @@id([membershipId, roleId])
+  @@index([roleId])
+}
+
+model JoinRequest {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation("JoinRequester", fields: [accountId], references: [id], onDelete: Cascade)
+
+  message String?
+
+  status JoinRequestStatus @default(PENDING)
+
+  reviewedById String?
+  reviewedBy   Account?  @relation("JoinReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt   DateTime?
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([townId, status])
+  @@index([accountId, status])
+}
+
+enum JoinRequestStatus {
+  PENDING
+  APPROVED
+  DENIED
+  WITHDRAWN
+}
+
+model TownInvite {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  code String @unique
+
+  /// Role granted on redemption. Null means the town's default role.
+  grantRoleId String?
+
+  maxUses   Int       @default(1)
+  uses      Int       @default(0)
+  expiresAt DateTime?
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([townId])
+}
+
+// ---------------------------------------------------------------------------
+// LAYER 3 — RECORDS
+// ---------------------------------------------------------------------------
+
+/// A person on a town's books. Town-owned: the town may edit or delete this
+/// row freely. The link to SLAvatar is what makes the person the same person
+/// in every town.
+model Citizen {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  /// Null for characters with no backing avatar (NPCs, alts not yet verified).
+  slAvatarId String?
+  slAvatar   SLAvatar? @relation(fields: [slAvatarId], references: [id], onDelete: SetNull)
+
+  firstName   String
+  lastName    String
+  /// In-character date of birth.
+  dateOfBirth DateTime?
+  gender      String?
+  address     String?
+  phone       String?
+  occupation  String?
+  photoUrl    String?
+
+  height String?
+  weight String?
+  eyes   String?
+  hair   String?
+
+  /// Free-form flags the town cares about: "ARMED_AND_DANGEROUS",
+  /// "MEDICAL_ALERT", "DO_NOT_APPROACH".
+  flags String[]
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents  IssuedDocument[]
+  citations  Citation[]
+  warrants   Warrant[]
+  vehicles   Vehicle[]
+  businesses Business[]
+
+  @@unique([townId, slAvatarId])
+  @@index([townId, lastName, firstName])
+}
+
+/// The cross-town artifact: an ID, a license, a permit, a plate. Issued by one
+/// town, visible to all (subject to the issuing town's shareRecords flag).
+model IssuedDocument {
+  id String @id @default(cuid())
+
+  type DocumentType
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  citizenId String?
+  citizen   Citizen? @relation(fields: [citizenId], references: [id], onDelete: SetNull)
+
+  /// Denormalised from the citizen at issue time and never cleared. This is the
+  /// thread that survives the issuing town deleting its citizen record — the
+  /// document still resolves in a global search.
+  slAvatarId String?
+  slAvatar   SLAvatar? @relation(fields: [slAvatarId], references: [id], onDelete: SetNull)
+
+  /// Human-readable document number, unique within the issuing town.
+  number String
+
+  /// Name printed on the document, frozen at issue time.
+  holderName String
+
+  status DocumentStatus @default(VALID)
+
+  /// Type-specific payload: endorsements and restrictions for a licence, plate
+  /// text and vehicle for a plate, scope for a permit.
+  data Json @default("{}")
+
+  issuedAt      DateTime  @default(now())
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+  revokedReason String?
+
+  issuedById String?
+
+  @@unique([townId, type, number])
+  @@index([slAvatarId, type, issuedAt(sort: Desc)])
+  @@index([townId, type, status])
+}
+
+enum DocumentType {
+  ID_CARD
+  DRIVERS_LICENSE
+  WEAPON_PERMIT
+  BUSINESS_LICENSE
+  LICENSE_PLATE
+  FISHING_LICENSE
+  BUILDING_PERMIT
+  OTHER
+}
+
+enum DocumentStatus {
+  VALID
+  EXPIRED
+  SUSPENDED
+  REVOKED
+}
+
+model Vehicle {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  citizenId String?
+  citizen   Citizen? @relation(fields: [citizenId], references: [id], onDelete: SetNull)
+
+  slAvatarId String?
+  slAvatar   SLAvatar? @relation(fields: [slAvatarId], references: [id], onDelete: SetNull)
+
+  plate String
+  make  String?
+  model String?
+  year  Int?
+  color String?
+  vin   String?
+
+  registrationStatus DocumentStatus @default(VALID)
+  insured            Boolean        @default(false)
+  stolen             Boolean        @default(false)
+  notes              String?
+
+  registeredAt DateTime  @default(now())
+  expiresAt    DateTime?
+
+  citations Citation[]
+
+  @@unique([townId, plate])
+  @@index([plate])
+  @@index([slAvatarId])
+}
+
+model Citation {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  citizenId String?
+  citizen   Citizen? @relation(fields: [citizenId], references: [id], onDelete: SetNull)
+
+  slAvatarId String?
+  slAvatar   SLAvatar? @relation(fields: [slAvatarId], references: [id], onDelete: SetNull)
+
+  vehicleId String?
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+
+  number String
+
+  /// One row per charge: { code, title, fine, points }.
+  charges Json @default("[]")
+
+  fineTotal Int            @default(0)
+  status    CitationStatus @default(UNPAID)
+
+  location  String?
+  narrative String?
+
+  issuedById String?
+  issuedAt   DateTime  @default(now())
+  paidAt     DateTime?
+
+  @@unique([townId, number])
+  @@index([slAvatarId, issuedAt(sort: Desc)])
+  @@index([townId, status])
+}
+
+enum CitationStatus {
+  UNPAID
+  PAID
+  CONTESTED
+  DISMISSED
+  IN_COURT
+}
+
+model Warrant {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  citizenId String?
+  citizen   Citizen? @relation(fields: [citizenId], references: [id], onDelete: SetNull)
+
+  slAvatarId String?
+  slAvatar   SLAvatar? @relation(fields: [slAvatarId], references: [id], onDelete: SetNull)
+
+  number String
+  type   WarrantType @default(ARREST)
+
+  charges Json @default("[]")
+
+  status WarrantStatus @default(ACTIVE)
+
+  /// Warrants are the one record type that is loud: an active warrant surfaces
+  /// at the top of a global search in every town.
+  bond      Int?
+  narrative String?
+
+  issuedById String?
+  issuedAt   DateTime  @default(now())
+  expiresAt  DateTime?
+  servedAt   DateTime?
+
+  @@unique([townId, number])
+  @@index([slAvatarId, status])
+  @@index([townId, status])
+}
+
+enum WarrantType {
+  ARREST
+  SEARCH
+  BENCH
+}
+
+enum WarrantStatus {
+  ACTIVE
+  SERVED
+  RECALLED
+  EXPIRED
+}
+
+model Business {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  ownerCitizenId String?
+  ownerCitizen   Citizen? @relation(fields: [ownerCitizenId], references: [id], onDelete: SetNull)
+
+  name    String
+  type    String?
+  address String?
+  phone   String?
+  taxId   String?
+  status  BusinessStatus @default(OPEN)
+  notes   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([townId, name])
+}
+
+enum BusinessStatus {
+  OPEN
+  CLOSED
+  SUSPENDED
+}
+
+// ---------------------------------------------------------------------------
+// OPERATIONS — dispatch, roster, reports
+// ---------------------------------------------------------------------------
+
+model Department {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  name  String
+  kind  DepartmentKind @default(POLICE)
+  color String         @default("#3b82f6")
+
+  units  Unit[]
+  shifts Shift[]
+
+  @@unique([townId, name])
+}
+
+enum DepartmentKind {
+  POLICE
+  FIRE
+  EMS
+  DISPATCH
+  CIVIL
+  OTHER
+}
+
+/// A callsign on the dispatch board — the thing that gets dragged onto a call.
+model Unit {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  callsign String
+
+  membershipId String?
+  membership   TownMembership? @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+
+  status   UnitStatus @default(OFF_DUTY)
+  location String?
+
+  callId String?
+  call   DispatchCall? @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([townId, callsign])
+  @@index([townId, status])
+}
+
+enum UnitStatus {
+  OFF_DUTY
+  AVAILABLE
+  EN_ROUTE
+  ON_SCENE
+  BUSY
+  PANIC
+}
+
+model DispatchCall {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  number   String
+  priority Int    @default(3)
+
+  type        String
+  location    String?
+  description String?
+
+  status CallStatus @default(PENDING)
+
+  callerName  String?
+  callerPhone String?
+
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  closedAt    DateTime?
+
+  /// Append-only timeline: { at, actor, kind, text }.
+  events Json @default("[]")
+
+  units   Unit[]
+  reports Report[]
+
+  @@unique([townId, number])
+  @@index([townId, status, priority])
+}
+
+enum CallStatus {
+  PENDING
+  DISPATCHED
+  ACTIVE
+  ON_HOLD
+  CLOSED
+}
+
+model Shift {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  membershipId String?
+  membership   TownMembership? @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+
+  title    String?
+  startsAt DateTime
+  endsAt   DateTime
+
+  status ShiftStatus @default(SCHEDULED)
+  notes  String?
+
+  @@index([townId, startsAt])
+}
+
+enum ShiftStatus {
+  SCHEDULED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+/// Output of the report builder. `template` names the form; `fields` holds the
+/// filled values, so a town can redesign a form without migrating old reports.
+model Report {
+  id String @id @default(cuid())
+
+  townId String
+  town   Town   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  callId String?
+  call   DispatchCall? @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  number   String
+  template String
+  title    String
+
+  fields Json @default("{}")
+
+  status       ReportStatus @default(DRAFT)
+  authorId     String?
+  approvedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([townId, number])
+  @@index([townId, status])
+}
+
+enum ReportStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+/// Immutable trail. Every destructive or cross-town action lands here.
+model AuditLog {
+  id String @id @default(cuid())
+
+  townId String?
+  town   Town?   @relation(fields: [townId], references: [id], onDelete: Cascade)
+
+  actorId String?
+  actor   Account? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String
+  targetType String?
+  targetId   String?
+
+  meta Json @default("{}")
+
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([townId, createdAt(sort: Desc)])
+  @@index([actorId, createdAt(sort: Desc)])
+}
